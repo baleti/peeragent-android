@@ -5,6 +5,14 @@ peer on a private [WireGuard](https://www.wireguard.com/) mesh: a small
 HTTP server exposing `play`/`pause`/`next`/`prev`/`seek`/`volume` against
 whatever's currently playing, reachable only from your own tunnel.
 
+> **Assumption:** you already have a WireGuard tunnel (or equivalent
+> private overlay network) reaching the phone. This app does not set one
+> up for you, and it is not safe to expose its port on an untrusted
+> network — its own defenses (source-IP check, required header) are
+> deliberately *not* a substitute for the tunnel, only a backstop against
+> what the tunnel structurally can't cover (see
+> [docs/design.md](docs/design.md)).
+
 No Gradle, no Play Services, no third-party dependencies. Built with the
 plain Android SDK command-line tools (`aapt2`, `kotlinc`, `d8`,
 `apksigner`) so it can be compiled from a normal Linux shell — including
