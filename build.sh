@@ -27,11 +27,19 @@ echo "kotlin-stdlib: $KOTLIN_STDLIB"
 rm -rf build
 mkdir -p build/classes build/dex
 
-echo "=== aapt2 link (manifest only, no custom resources) ==="
+RES_ARGS=()
+if [ -d res ]; then
+  echo "=== aapt2 compile (res/) ==="
+  "$AAPT2" compile -o build/compiled-res.zip --dir res
+  RES_ARGS=(-R build/compiled-res.zip)
+fi
+
+echo "=== aapt2 link ==="
 "$AAPT2" link -o build/base.apk \
   -I "$ANDROID_JAR" \
   --manifest AndroidManifest.xml \
-  --min-sdk-version 29 --target-sdk-version 34
+  --min-sdk-version 29 --target-sdk-version 34 \
+  "${RES_ARGS[@]}"
 
 echo "=== kotlinc ==="
 "$KOTLINC" -cp "$ANDROID_JAR" -d build/classes $(find src -name "*.kt")

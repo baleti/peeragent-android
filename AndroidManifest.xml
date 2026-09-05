@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <application android:label="PeerAgent Companion" android:allowBackup="false">
+    <application android:label="PeerAgent Companion" android:allowBackup="false" android:icon="@mipmap/ic_launcher">
 
         <activity
             android:name=".MainActivity"
