@@ -56,6 +56,7 @@ full security model.
 | Method | Path | |
 | --- | --- | --- |
 | GET | `/status` | Current playback state as JSON |
+| GET | `/adb-port` | This phone's Wireless debugging port (from adbd's mDNS advert), plain text; 404 if it is off. The port changes on every toggle/reboot |
 | POST | `/command/play` \| `pause` \| `next` \| `prev` \| `seek-fwd` \| `seek-back` \| `volume-up` \| `volume-down` | |
 | POST | `/command/seek-to?ms=<n>` | Seek to an absolute position |
 | GET | `/events` | Server-sent events (currently unused by any client) |

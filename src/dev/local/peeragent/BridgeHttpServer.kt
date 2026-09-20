@@ -56,6 +56,7 @@ class BridgeHttpServer(
     private val port: Int,
     private val sink: CommandSink,
     private val log: (String) -> Unit,
+    private val adbPort: () -> Int? = { null },
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -206,6 +207,11 @@ class BridgeHttpServer(
             when {
                 method == "GET" && path == "/events" -> handleSse(client)
                 method == "GET" && path == "/status" -> respondAndClose(client, 200, "application/json", sink.statusJson())
+                method == "GET" && path == "/adb-port" -> {
+                    val p = adbPort()
+                    if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
+                    else respondAndClose(client, 404, "text/plain", "wireless debugging off")
+                }
                 method == "POST" && path == "/command/play" -> { sink.play(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/pause" -> { sink.pause(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/next" -> { sink.next(); respondAndClose(client, 200, "text/plain", "ok") }

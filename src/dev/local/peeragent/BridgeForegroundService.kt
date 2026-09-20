@@ -29,6 +29,7 @@ class BridgeForegroundService : Service(), CommandSink {
     private lateinit var mediaSessionManager: MediaSessionManager
     private lateinit var listenerComponent: ComponentName
     private var httpServer: BridgeHttpServer? = null
+    private var adbPortFinder: AdbPortFinder? = null
     private val audioManager: AudioManager by lazy { getSystemService(AudioManager::class.java) }
 
     private val controllers = CopyOnWriteArrayList<MediaController>()
@@ -76,7 +77,8 @@ class BridgeForegroundService : Service(), CommandSink {
             }
 
             try {
-                httpServer = BridgeHttpServer(PORT, this) { msg -> Log.i(TAG, msg) }
+                adbPortFinder = AdbPortFinder(this) { msg -> Log.i(TAG, msg); diag(msg) }.also { it.start() }
+                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, { adbPortFinder?.port() })
                 httpServer?.start()
             } catch (e: Throwable) {
                 diag("onCreate: http server threw ${e.javaClass.name}: ${e.message}")
@@ -97,6 +99,7 @@ class BridgeForegroundService : Service(), CommandSink {
         for ((controller, cb) in callbacks) controller.unregisterCallback(cb)
         callbacks.clear()
         httpServer?.stop()
+        adbPortFinder?.stop()
         super.onDestroy()
     }
 
