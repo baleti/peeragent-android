@@ -52,6 +52,7 @@ class AdbToggle(
     fun acquire(): Int? {
         synchronized(this) {
             if (!isOn()) {
+                finder.restart()
                 put(true)
                 prefs.edit().putBoolean("by_us", true).apply()
                 log("adb toggle: turned Wireless debugging on")
@@ -59,8 +60,13 @@ class AdbToggle(
             if (prefs.getBoolean("by_us", false)) schedule()
         }
         val deadline = System.currentTimeMillis() + PORT_WAIT_MS
+        var restarted = false
         while (System.currentTimeMillis() < deadline) {
             finder.port()?.let { return it }
+            // Nothing after 3 s: the advert may have been swallowed, look again.
+            if (!restarted && System.currentTimeMillis() > deadline - PORT_WAIT_MS + 3_000) {
+                finder.restart(); restarted = true
+            }
             Thread.sleep(100)
         }
         return null
