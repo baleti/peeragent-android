@@ -56,7 +56,7 @@ class BridgeHttpServer(
     private val port: Int,
     private val sink: CommandSink,
     private val log: (String) -> Unit,
-    private val adbPort: () -> Int? = { null },
+    private val adb: AdbToggle? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -208,9 +208,14 @@ class BridgeHttpServer(
                 method == "GET" && path == "/events" -> handleSse(client)
                 method == "GET" && path == "/status" -> respondAndClose(client, 200, "application/json", sink.statusJson())
                 method == "GET" && path == "/adb-port" -> {
-                    val p = adbPort()
+                    val p = adb?.port()
                     if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
                     else respondAndClose(client, 404, "text/plain", "wireless debugging off")
+                }
+                method == "POST" && path == "/adb/enable" -> handleAdbEnable(client)
+                method == "POST" && path == "/adb/release" -> {
+                    adb?.release()
+                    respondAndClose(client, 200, "text/plain", "ok")
                 }
                 method == "POST" && path == "/command/play" -> { sink.play(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/pause" -> { sink.pause(); respondAndClose(client, 200, "text/plain", "ok") }
@@ -226,6 +231,17 @@ class BridgeHttpServer(
         } catch (t: Throwable) {
             log("handleClient failed: ${t.javaClass.name}: ${t.message}")
             closeQuietly(client)
+        }
+    }
+
+    private fun handleAdbEnable(client: Socket) {
+        if (adb == null) { respondAndClose(client, 404, "text/plain", "not available"); return }
+        try {
+            val p = adb.acquire()
+            if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
+            else respondAndClose(client, 503, "text/plain", "no port after enabling")
+        } catch (e: SecurityException) {
+            respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
         }
     }
 
@@ -265,6 +281,8 @@ class BridgeHttpServer(
                 400 -> "Bad Request"
                 403 -> "Forbidden"
                 404 -> "Not Found"
+                500 -> "Internal Server Error"
+                503 -> "Service Unavailable"
                 405 -> "Method Not Allowed"
                 else -> "Error"
             }

@@ -57,6 +57,8 @@ full security model.
 | --- | --- | --- |
 | GET | `/status` | Current playback state as JSON |
 | GET | `/adb-port` | This phone's Wireless debugging port (from adbd's mDNS advert), plain text; 404 if it is off. The port changes on every toggle/reboot |
+| POST | `/adb/enable` | Turn Wireless debugging on if it was off, wait for its port and return it. Needs `WRITE_SECURE_SETTINGS` (below); 500 if not granted. Switches itself off again after 90 s if never released |
+| POST | `/adb/release` | Turn Wireless debugging back off, only if `/adb/enable` was what turned it on |
 | POST | `/command/play` \| `pause` \| `next` \| `prev` \| `seek-fwd` \| `seek-back` \| `volume-up` \| `volume-down` | |
 | POST | `/command/seek-to?ms=<n>` | Seek to an absolute position |
 | GET | `/events` | Server-sent events (currently unused by any client) |
@@ -64,3 +66,14 @@ full security model.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Optional: lending out Wireless debugging (`/adb/*`)
+
+A peer that needs `adb shell` privileges on the phone (e.g. to connect or
+disconnect a single Bluetooth device, which no normal app can) can ask the app
+to open Wireless debugging just for the duration. One-time grant from an
+already-paired host:
+
+    adb shell pm grant dev.local.peeragent android.permission.WRITE_SECURE_SETTINGS
+
+The grant survives updates and is lost on uninstall.
