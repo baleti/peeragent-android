@@ -7,13 +7,17 @@ import android.app.Service
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.IBinder
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.CopyOnWriteArrayList
 
 class BridgeForegroundService : Service(), CommandSink {
@@ -222,7 +226,57 @@ class BridgeForegroundService : Service(), CommandSink {
         val pkg = c.packageName ?: ""
         return "{\"active\":true,\"title\":\"${esc(title)}\",\"artist\":\"${esc(artist)}\",\"album\":\"${esc(album)}\"," +
             "\"state\":\"$stateStr\",\"position\":$position,\"duration\":$duration,\"speed\":$speed," +
-            "\"volume\":${volumeRatio()},\"package\":\"${esc(pkg)}\"}"
+            "\"volume\":${volumeRatio()},\"package\":\"${esc(pkg)}\",\"art\":${hasArt(md)}}"
+    }
+
+    // Cover art for the current track, for the desktop bridge's notifications
+    // and MPRIS artUrl. Players hand it over as a Bitmap and/or a URI; take a
+    // bitmap when there is one (nothing to fetch), else try to open the URI.
+    // Not every player publishes any -- callers must cope with null.
+    private val artBitmapKeys = arrayOf(
+        MediaMetadata.METADATA_KEY_ALBUM_ART, MediaMetadata.METADATA_KEY_ART,
+        MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+    private val artUriKeys = arrayOf(
+        MediaMetadata.METADATA_KEY_ALBUM_ART_URI, MediaMetadata.METADATA_KEY_ART_URI,
+        MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+
+    private fun hasArt(md: MediaMetadata?): Boolean =
+        md != null && (artBitmapKeys.any { md.getBitmap(it) != null } ||
+            artUriKeys.any { !md.getString(it).isNullOrEmpty() })
+
+    private fun loadUri(uriStr: String): Bitmap? = try {
+        val uri = Uri.parse(uriStr)
+        if (uri.scheme == "http" || uri.scheme == "https") {
+            java.net.URL(uriStr).openStream().use { BitmapFactory.decodeStream(it) }
+        } else {
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+        }
+    } catch (t: Throwable) {
+        diag("art uri failed ($uriStr): ${t.javaClass.simpleName}: ${t.message}")
+        null
+    }
+
+    override fun artJpeg(): ByteArray? {
+        val md = canonical?.metadata ?: return null
+        var bmp: Bitmap? = artBitmapKeys.firstNotNullOfOrNull { md.getBitmap(it) }
+        if (bmp == null) {
+            for (k in artUriKeys) {
+                val u = md.getString(k)
+                if (!u.isNullOrEmpty()) { bmp = loadUri(u); if (bmp != null) break }
+            }
+        }
+        if (bmp == null) return null
+        // 512px is plenty for a notification thumbnail / media panel and keeps
+        // the transfer to a few tens of KB over the tunnel.
+        val longest = maxOf(bmp.width, bmp.height)
+        if (longest > 512) {
+            val f = 512f / longest
+            bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * f).toInt().coerceAtLeast(1),
+                (bmp.height * f).toInt().coerceAtLeast(1), true)
+        }
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        return out.toByteArray()
     }
 
     override fun play() { canonical?.transportControls?.play() }

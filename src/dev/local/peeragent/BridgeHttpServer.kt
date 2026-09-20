@@ -22,6 +22,7 @@ interface CommandSink {
     fun volumeUp()
     fun volumeDown()
     fun statusJson(): String
+    fun artJpeg(): ByteArray?
 }
 
 /**
@@ -207,6 +208,11 @@ class BridgeHttpServer(
             when {
                 method == "GET" && path == "/events" -> handleSse(client)
                 method == "GET" && path == "/status" -> respondAndClose(client, 200, "application/json", sink.statusJson())
+                method == "GET" && path == "/art" -> {
+                    val art = sink.artJpeg()
+                    if (art != null) respondBytesAndClose(client, "image/jpeg", art)
+                    else respondAndClose(client, 404, "text/plain", "no art")
+                }
                 method == "GET" && path == "/adb-port" -> {
                     val p = adb?.port()
                     if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
@@ -271,6 +277,20 @@ class BridgeHttpServer(
         os.write(headerText.toByteArray(StandardCharsets.UTF_8))
         os.flush()
         sseClients.add(os)
+    }
+
+    private fun respondBytesAndClose(client: Socket, contentType: String, bytes: ByteArray) {
+        try {
+            val header = "HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\n" +
+                "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+            val os = client.getOutputStream()
+            os.write(header.toByteArray(StandardCharsets.UTF_8))
+            os.write(bytes)
+            os.flush()
+        } catch (_: IOException) {
+        } finally {
+            closeQuietly(client)
+        }
     }
 
     private fun respondAndClose(client: Socket, code: Int, contentType: String, body: String) {
