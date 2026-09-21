@@ -9,27 +9,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
-    <!-- Lets this app install/update the other apps built in this project
-         over the WireGuard bridge (see AppInstaller.kt) instead of needing
-         adb. `pm set-installer` (the API that would make this fully
-         silent) needs the CALLER to be signed with the same cert as the
-         installer being registered; confirmed live 2026-09-21 that a
-         bare `adb shell` can never satisfy that without root, so a
-         system confirmation dialog appears on every install. Still a
-         real improvement: one tap, versus adb's much broader standing
-         exposure. -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-
-    <!-- Package-visibility (API 30+): without this, PackageManager
-         queries about these packages (see Diagnostics.kt) silently
-         behave as "not installed" even when they genuinely are;
-         confirmed live 2026-09-21 (dictate-android reported
-         targetInstalled:false while running on-screen at the time). -->
-    <queries>
-        <package android:name="dev.local.dictate" />
-        <package android:name="dev.local.claudeagents" />
-        <package android:name="dev.local.newsdigest" />
-    </queries>
 
     <application android:label="PeerAgent Companion" android:allowBackup="false" android:icon="@mipmap/ic_launcher">
 

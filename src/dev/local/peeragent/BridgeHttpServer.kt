@@ -1,8 +1,8 @@
 package dev.local.peeragent
 
-import java.io.ByteArrayOutputStream
+import java.io.BufferedReader
 import java.io.IOException
-import java.io.InputStream
+import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -58,8 +58,6 @@ class BridgeHttpServer(
     private val sink: CommandSink,
     private val log: (String) -> Unit,
     private val adb: AdbToggle? = null,
-    private val installer: AppInstaller? = null,
-    private val diagContext: android.content.Context? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -166,15 +164,8 @@ class BridgeHttpServer(
                 return
             }
 
-            // Raw byte-based line reading, NOT a BufferedReader -- a
-            // BufferedReader/InputStreamReader decodes+buffers ahead of
-            // whatever readLine() actually consumes, which would silently
-            // swallow/corrupt the start of a binary body (see /app/install
-            // below, the first route here that ever needs one). Reading
-            // one byte at a time guarantees the stream sits at EXACTLY the
-            // first body byte once the blank line after headers is seen.
-            val rawInput = client.getInputStream()
-            val requestLine = readLineRaw(rawInput) ?: return closeQuietly(client)
+            val input = BufferedReader(InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8))
+            val requestLine = input.readLine() ?: return closeQuietly(client)
             val parts = requestLine.split(" ")
             if (parts.size < 2) { respondAndClose(client, 400, "text/plain", "bad request"); return }
             val method = parts[0]
@@ -186,16 +177,14 @@ class BridgeHttpServer(
             // also sent a body does not leave it framed on the socket.
             var guard: String? = null
             var origin: String? = null
-            var contentLength = 0
             while (true) {
-                val line = readLineRaw(rawInput) ?: break
+                val line = input.readLine() ?: break
                 if (line.isEmpty()) break
                 val idx = line.indexOf(':')
                 if (idx <= 0) continue
                 when (line.substring(0, idx).trim().lowercase()) {
                     "x-peer-agent" -> guard = line.substring(idx + 1).trim()
                     "origin" -> origin = line.substring(idx + 1).trim()
-                    "content-length" -> contentLength = line.substring(idx + 1).trim().toIntOrNull() ?: 0
                 }
             }
 
@@ -234,18 +223,6 @@ class BridgeHttpServer(
                     adb?.release()
                     respondAndClose(client, 200, "text/plain", "ok")
                 }
-                method == "POST" && path == "/app/install" -> handleAppInstall(client, rawInput, contentLength)
-                method == "GET" && path == "/diag" -> {
-                    val ctx = diagContext
-                    if (ctx == null) {
-                        respondAndClose(client, 404, "text/plain", "not available")
-                    } else {
-                        val targetPackage = query.split("&")
-                            .firstOrNull { it.startsWith("package=") }
-                            ?.removePrefix("package=")
-                        respondAndClose(client, 200, "application/json", Diagnostics.json(ctx, targetPackage))
-                    }
-                }
                 method == "POST" && path == "/command/play" -> { sink.play(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/pause" -> { sink.pause(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/next" -> { sink.next(); respondAndClose(client, 200, "text/plain", "ok") }
@@ -272,34 +249,6 @@ class BridgeHttpServer(
         } catch (e: SecurityException) {
             respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
         }
-    }
-
-    // Body cap matches the largest APK any of this project's apps has
-    // built to so far, with real headroom -- large enough for any of
-    // these hand-built (no dependency bloat) apps, small enough that a
-    // malformed/hostile Content-Length can't be used to make this thread
-    // allocate something absurd.
-    private val MAX_APK_BYTES = 64 * 1024 * 1024
-
-    private fun handleAppInstall(client: Socket, rawInput: InputStream, contentLength: Int) {
-        if (installer == null) { respondAndClose(client, 404, "text/plain", "not available"); return }
-        if (contentLength <= 0 || contentLength > MAX_APK_BYTES) {
-            respondAndClose(client, 400, "text/plain", "bad or missing Content-Length")
-            return
-        }
-        log("app/install: reading $contentLength bytes")
-        val apkBytes = try {
-            readBodyRaw(rawInput, contentLength)
-        } catch (e: IOException) {
-            log("app/install: body read failed: ${e.message}")
-            respondAndClose(client, 400, "text/plain", "body read failed: ${e.message}")
-            return
-        }
-        log("app/install: body read ok (${apkBytes.size} bytes), committing session")
-        val result = installer.install(apkBytes)
-        log("app/install: result=$result")
-        val code = if (result == "installed") 200 else 500
-        respondAndClose(client, code, "text/plain", result)
     }
 
     private fun handleSeekTo(client: Socket, query: String) {
@@ -373,33 +322,5 @@ class BridgeHttpServer(
 
     private fun closeQuietly(client: Socket) {
         try { client.close() } catch (_: IOException) {}
-    }
-
-    // One byte at a time, deliberately -- see acceptLoop's call site doc
-    // for why this replaces the earlier BufferedReader (over-buffering
-    // would eat into a binary body that follows the headers).
-    private fun readLineRaw(input: InputStream): String? {
-        val buf = ByteArrayOutputStream()
-        while (true) {
-            val b = input.read()
-            if (b == -1) return if (buf.size() == 0) null else buf.toString("UTF-8")
-            if (b == '\n'.code) {
-                val bytes = buf.toByteArray()
-                val end = if (bytes.isNotEmpty() && bytes[bytes.size - 1] == '\r'.code.toByte()) bytes.size - 1 else bytes.size
-                return String(bytes, 0, end, StandardCharsets.UTF_8)
-            }
-            buf.write(b)
-        }
-    }
-
-    private fun readBodyRaw(input: InputStream, length: Int): ByteArray {
-        val out = ByteArray(length)
-        var off = 0
-        while (off < length) {
-            val n = input.read(out, off, length - off)
-            if (n == -1) throw IOException("connection closed after $off/$length bytes")
-            off += n
-        }
-        return out
     }
 }
