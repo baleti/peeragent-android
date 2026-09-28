@@ -35,10 +35,18 @@ if [ -d res ]; then
 fi
 
 echo "=== aapt2 link ==="
+# --auto-add-overlay: aapt2 treats -R inputs as overlays onto an (empty,
+# there being no separate base here) resource table, and without this
+# flag rejects any *value* resource (colors.xml etc, as opposed to a
+# file-based one like a mipmap PNG/XML) that isn't already present in an
+# earlier -R input as "does not override an existing resource" -- broke
+# the very first build after res/values/colors.xml was added for the
+# adaptive launcher icon.
 "$AAPT2" link -o build/base.apk \
   -I "$ANDROID_JAR" \
   --manifest AndroidManifest.xml \
   --min-sdk-version 29 --target-sdk-version 34 \
+  --auto-add-overlay \
   "${RES_ARGS[@]}"
 
 echo "=== kotlinc ==="

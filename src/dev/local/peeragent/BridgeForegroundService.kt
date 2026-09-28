@@ -86,7 +86,7 @@ class BridgeForegroundService : Service(), CommandSink {
                 val finder = AdbPortFinder(this, adbLog).also { it.start() }
                 adbPortFinder = finder
                 adbToggle = AdbToggle(this, finder, adbLog)
-                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle)
+                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle, { WireGuardCheck.isActive(this) })
                 httpServer?.start()
             } catch (e: Throwable) {
                 diag("onCreate: http server threw ${e.javaClass.name}: ${e.message}")

@@ -1,8 +1,7 @@
 package dev.local.peeragent
 
-import java.io.BufferedReader
 import java.io.IOException
-import java.io.InputStreamReader
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -58,6 +57,7 @@ class BridgeHttpServer(
     private val sink: CommandSink,
     private val log: (String) -> Unit,
     private val adb: AdbToggle? = null,
+    private val wireGuardActive: (() -> Boolean)? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -164,8 +164,14 @@ class BridgeHttpServer(
                 return
             }
 
-            val input = BufferedReader(InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8))
-            val requestLine = input.readLine() ?: return closeQuietly(client)
+            // Read byte-at-a-time (not a BufferedReader) so nothing past the
+            // blank line that ends the headers is ever consumed - a POST with
+            // a binary body (the privileged-install endpoint) reads exactly
+            // Content-Length raw bytes straight off this same stream next,
+            // and a BufferedReader's internal buffering would silently eat
+            // the start of that body while parsing headers.
+            val rawIn = client.getInputStream()
+            val requestLine = readHttpLine(rawIn) ?: return closeQuietly(client)
             val parts = requestLine.split(" ")
             if (parts.size < 2) { respondAndClose(client, 400, "text/plain", "bad request"); return }
             val method = parts[0]
@@ -177,14 +183,24 @@ class BridgeHttpServer(
             // also sent a body does not leave it framed on the socket.
             var guard: String? = null
             var origin: String? = null
+            var contentLength = 0
+            var signature: String? = null
+            var timestamp: String? = null
+            var nonce: String? = null
+            var authorization: String? = null
             while (true) {
-                val line = input.readLine() ?: break
+                val line = readHttpLine(rawIn) ?: break
                 if (line.isEmpty()) break
                 val idx = line.indexOf(':')
                 if (idx <= 0) continue
                 when (line.substring(0, idx).trim().lowercase()) {
                     "x-peer-agent" -> guard = line.substring(idx + 1).trim()
                     "origin" -> origin = line.substring(idx + 1).trim()
+                    "content-length" -> contentLength = line.substring(idx + 1).trim().toIntOrNull() ?: 0
+                    "x-signature" -> signature = line.substring(idx + 1).trim()
+                    "x-timestamp" -> timestamp = line.substring(idx + 1).trim()
+                    "x-nonce" -> nonce = line.substring(idx + 1).trim()
+                    "authorization" -> authorization = line.substring(idx + 1).trim()
                 }
             }
 
@@ -232,12 +248,163 @@ class BridgeHttpServer(
                 method == "POST" && path == "/command/seek-to" -> handleSeekTo(client, query)
                 method == "POST" && path == "/command/volume-up" -> { sink.volumeUp(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/volume-down" -> { sink.volumeDown(); respondAndClose(client, 200, "text/plain", "ok") }
+                method == "GET" && path == "/privileged/diagnostics" ->
+                    handlePrivileged(client, "GET", path, query, signature, timestamp, nonce, ByteArray(0)) { q ->
+                        val pkg = queryParam(q, "pkg") ?: return@handlePrivileged 400 to "missing pkg"
+                        val r = HelperBridge.enqueueAndWait("DIAG", pkg, ByteArray(0))
+                        (if (r.ok) 200 else 502) to r.message
+                    }
+                method == "POST" && path == "/privileged/install" -> {
+                    if (contentLength <= 0 || contentLength > 200 * 1024 * 1024) {
+                        respondAndClose(client, 400, "text/plain", "bad or missing content-length")
+                    } else {
+                        val body = readExact(rawIn, contentLength)
+                        // Fire-and-forget, not enqueueAndWait: installing
+                        // peeragent's own package kills and restarts this
+                        // process partway through pm install, which would
+                        // tear down the very response thread trying to
+                        // deliver a synchronous result - confirmed live (the
+                        // install lands fine; only the reply never arrives).
+                        // Caller confirms via a follow-up /privileged/diagnostics
+                        // call (lastUpdateTime), same convention used
+                        // elsewhere in this project to verify a silent install.
+                        handlePrivileged(client, "POST", path, query, signature, timestamp, nonce, body) { q ->
+                            val pkg = queryParam(q, "pkg") ?: return@handlePrivileged 400 to "missing pkg"
+                            val id = HelperBridge.enqueueAsync("INSTALL", pkg, body)
+                            if (id != null) 202 to "accepted, request id=$id - confirm via /privileged/diagnostics"
+                            else 503 to "another privileged request is already in flight"
+                        }
+                    }
+                }
+                // Loopback-only, shared-secret-gated (see HelperBridge's class
+                // doc for why not uid-checked): the privileged helper polls
+                // this instead of peeragent connecting out to it.
+                method == "GET" && path == "/helper/poll" -> handleHelperPoll(client, authorization)
+                method == "POST" && path == "/helper/result" -> {
+                    val len = contentLength.coerceAtMost(1_000_000)
+                    val resultBody = if (len > 0) String(readExact(rawIn, len), StandardCharsets.UTF_8) else ""
+                    handleHelperResult(client, query, authorization, resultBody)
+                }
                 else -> respondAndClose(client, 404, "text/plain", "not found")
             }
         } catch (t: Throwable) {
             log("handleClient failed: ${t.javaClass.name}: ${t.message}")
             closeQuietly(client)
         }
+    }
+
+    // Shared gate for both privileged-relay endpoints: Ed25519 signature
+    // (host3-only, layered on top of WireGuard's peer trust) + a live check
+    // that WireGuard is actually up right now, not just that the packet's
+    // source address happens to look like it came through the tunnel.
+    // Loopback ONLY, never 10.10.0.0/24 - this is purely local IPC to the
+    // privileged helper, not something host3 or any other peer should ever
+    // reach. sourceAllowed() already permits both; narrowed further here.
+    private fun helperAuthorized(client: Socket, authorization: String?): Boolean {
+        if (client.inetAddress?.isLoopbackAddress != true) {
+            log("helper endpoint: rejected non-loopback source ${client.inetAddress?.hostAddress}")
+            return false
+        }
+        return authorization == "Bearer ${HelperBridge.SHARED_SECRET}"
+    }
+
+    private fun handleHelperPoll(client: Socket, authorization: String?) {
+        if (!helperAuthorized(client, authorization)) {
+            respondAndClose(client, 403, "text/plain", "forbidden")
+            return
+        }
+        val pending = HelperBridge.poll()
+        if (pending == null) {
+            respondAndClose(client, 204, "text/plain", "")
+            return
+        }
+        // id \n action \n pkg \n <raw body bytes>
+        val header = "${pending.id}\n${pending.action}\n${pending.pkg}\n".toByteArray(StandardCharsets.UTF_8)
+        respondBytesAndClose(client, "application/octet-stream", header + pending.body)
+    }
+
+    private fun handleHelperResult(client: Socket, query: String, authorization: String?, body: String) {
+        if (!helperAuthorized(client, authorization)) {
+            respondAndClose(client, 403, "text/plain", "forbidden")
+            return
+        }
+        val id = queryParam(query, "id")?.toLongOrNull()
+        val ok = queryParam(query, "ok") == "1"
+        if (id == null) {
+            respondAndClose(client, 400, "text/plain", "missing id")
+            return
+        }
+        val accepted = HelperBridge.submitResult(id, ok, body)
+        respondAndClose(client, if (accepted) 200 else 404, "text/plain", if (accepted) "ok" else "no such pending request")
+    }
+
+    private fun handlePrivileged(
+        client: Socket,
+        method: String,
+        path: String,
+        query: String,
+        signature: String?,
+        timestamp: String?,
+        nonce: String?,
+        body: ByteArray,
+        action: (String) -> Pair<Int, String>,
+    ) {
+        if (wireGuardActive?.invoke() != true) {
+            log("privileged: rejected, WireGuard not active")
+            respondAndClose(client, 503, "text/plain", "wireguard not active")
+            return
+        }
+        if (signature == null || timestamp == null || nonce == null) {
+            respondAndClose(client, 401, "text/plain", "missing signature headers")
+            return
+        }
+        val ts = timestamp.toLongOrNull()
+        if (ts == null) {
+            respondAndClose(client, 401, "text/plain", "bad timestamp")
+            return
+        }
+        val rejection = Ed25519Verify.verify(method, path, ts, nonce, body, signature)
+        if (rejection != null) {
+            log("privileged: rejected: $rejection")
+            respondAndClose(client, 401, "text/plain", rejection)
+            return
+        }
+        val (code, message) = action(query)
+        respondAndClose(client, code, "text/plain", message)
+    }
+
+    private fun queryParam(query: String, name: String): String? =
+        query.split("&")
+            .firstOrNull { it.startsWith("$name=") }
+            ?.removePrefix("$name=")
+            ?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun readHttpLine(input: InputStream): String? {
+        val sb = StringBuilder()
+        var any = false
+        while (true) {
+            val c = input.read()
+            if (c == -1) return if (any) sb.toString() else null
+            any = true
+            if (c == '\n'.code) {
+                if (sb.isNotEmpty() && sb.last() == '\r') sb.setLength(sb.length - 1)
+                return sb.toString()
+            }
+            sb.append(c.toChar())
+            if (sb.length > 8192) return sb.toString()
+        }
+    }
+
+    private fun readExact(input: InputStream, length: Int): ByteArray {
+        val buf = ByteArray(length)
+        var off = 0
+        while (off < length) {
+            val n = input.read(buf, off, length - off)
+            if (n < 0) throw IOException("body ended early, $off/$length bytes")
+            off += n
+        }
+        return buf
     }
 
     private fun handleAdbEnable(client: Socket) {
