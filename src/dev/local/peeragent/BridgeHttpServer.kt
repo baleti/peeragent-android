@@ -285,6 +285,19 @@ class BridgeHttpServer(
                     val resultBody = if (len > 0) String(readExact(rawIn, len), StandardCharsets.UTF_8) else ""
                     handleHelperResult(client, query, authorization, resultBody)
                 }
+                // Loopback-only, no signature/secret needed: stopping the
+                // privileged process is conservative (it can only end it
+                // early, never trigger a privileged action), and the "Peer
+                // App Debugger" tile app must be able to do this without
+                // host3's cooperation - see HelperBridge.requestLocalStop's doc.
+                method == "POST" && path == "/helper/local-stop" -> {
+                    if (client.inetAddress?.isLoopbackAddress != true) {
+                        respondAndClose(client, 403, "text/plain", "forbidden")
+                    } else {
+                        val queued = HelperBridge.requestLocalStop()
+                        respondAndClose(client, if (queued) 200 else 503, "text/plain", if (queued) "stop queued" else "another privileged request is already in flight")
+                    }
+                }
                 else -> respondAndClose(client, 404, "text/plain", "not found")
             }
         } catch (t: Throwable) {

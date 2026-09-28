@@ -58,6 +58,14 @@ object HelperBridge {
 
     class RelayResult(val ok: Boolean, val message: String)
 
+    // Deliberately reachable without Ed25519/WireGuard-active (see
+    // BridgeHttpServer's /helper/local-stop, loopback-only): stopping is
+    // conservative - it can only end the privileged process early, never
+    // trigger a privileged action - and "the user can stop it themselves at
+    // any time, without needing host3" was an explicit requirement. Returns
+    // false only if a different request is already in flight.
+    fun requestLocalStop(): Boolean = enqueueAsync("STOP", "", ByteArray(0)) != null
+
     // INSTALL is fire-and-forget (see enqueueAsync's doc): when the target
     // package is peeragent's own, `pm install -r` kills and restarts this
     // whole process partway through, which tears down the very HTTP
