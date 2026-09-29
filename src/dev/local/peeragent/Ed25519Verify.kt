@@ -17,7 +17,9 @@ import java.util.concurrent.ConcurrentHashMap
  * Signature/KeyFactory algorithms); callers must guard on SDK level.
  *
  * Canonical string signed by the caller:
- *   METHOD "\n" PATH "\n" TIMESTAMP_MS "\n" NONCE "\n" base64(sha256(body))
+ *   METHOD "\n" PATH_AND_QUERY "\n" TIMESTAMP_MS "\n" NONCE "\n" base64(sha256(body))
+ * PATH_AND_QUERY includes the query string (e.g. "/privileged/install?pkg=X") -
+ * it must, since that's what actually determines which app a request targets.
  * Timestamp must be within [MAX_SKEW_MS] of now, and each (timestamp, nonce)
  * pair may only be seen once - both replay defenses on top of the signature
  * itself, since a captured-and-replayed genuine signature would otherwise
@@ -50,28 +52,40 @@ object Ed25519Verify {
     fun available(): Boolean = android.os.Build.VERSION.SDK_INT >= 31
 
     /** @return null if valid, else a rejection reason string. */
-    fun verify(method: String, path: String, timestampMs: Long, nonce: String, body: ByteArray, signatureB64: String): String? {
+    fun verify(method: String, pathAndQuery: String, timestampMs: Long, nonce: String, body: ByteArray, signatureB64: String): String? {
         if (!available()) return "Ed25519 unsupported on this API level"
         val now = System.currentTimeMillis()
         if (Math.abs(now - timestampMs) > MAX_SKEW_MS) return "timestamp outside allowed skew"
         if (nonce.isBlank() || nonce.length > 128) return "bad nonce"
 
-        pruneNonces(now)
-        val nonceKey = "$timestampMs:$nonce"
-        if (seenNonces.putIfAbsent(nonceKey, now) != null) return "replay: nonce already used"
-
+        // Signature verified BEFORE the nonce is ever recorded as seen:
+        // originally this was ordered the other way, which let anyone who
+        // could reach this endpoint (any WireGuard peer, not just a
+        // validly-signed host3 request) insert entries into the replay
+        // cache using nothing but a fresh-looking timestamp+nonce and no
+        // valid signature at all - an unauthenticated way to grow
+        // seenNonces. Checking the signature first means only a request
+        // that's already been cryptographically proven genuine ever
+        // consumes a nonce slot.
         val bodyHash = MessageDigest.getInstance("SHA-256").digest(body)
-        val canonical = "$method\n$path\n$timestampMs\n$nonce\n${Base64.encodeToString(bodyHash, Base64.NO_WRAP)}"
+        val canonical = "$method\n$pathAndQuery\n$timestampMs\n$nonce\n${Base64.encodeToString(bodyHash, Base64.NO_WRAP)}"
 
-        return try {
+        val sigValid = try {
             val sig = Signature.getInstance("Ed25519")
             sig.initVerify(publicKey)
             sig.update(canonical.toByteArray(Charsets.UTF_8))
             val sigBytes = Base64.decode(signatureB64, Base64.DEFAULT)
-            if (sig.verify(sigBytes)) null else "signature verification failed"
+            sig.verify(sigBytes)
         } catch (e: Exception) {
-            "signature check error: ${e.javaClass.simpleName}: ${e.message}"
+            return "signature check error: ${e.javaClass.simpleName}: ${e.message}"
         }
+        if (!sigValid) return "signature verification failed"
+
+        pruneNonces(now)
+        val nonceKey = "$timestampMs:$nonce"
+        if (seenNonces.putIfAbsent(nonceKey, now) != null) return "replay: nonce already used"
+
+        return null
     }
 
     private fun pruneNonces(now: Long) {

@@ -318,7 +318,13 @@ class BridgeHttpServer(
             log("helper endpoint: rejected non-loopback source ${client.inetAddress?.hostAddress}")
             return false
         }
-        return authorization == "Bearer ${HelperBridge.SHARED_SECRET}"
+        if (authorization == null || !authorization.startsWith("Bearer ")) return false
+        // Constant-time comparison: a plain == (loopback-only, so a local
+        // attacker at worst) could still time-leak the secret byte-by-byte
+        // via string equality's early-exit-on-first-mismatch behavior.
+        val provided = authorization.removePrefix("Bearer ").toByteArray(StandardCharsets.UTF_8)
+        val expected = HelperBridge.SHARED_SECRET.toByteArray(StandardCharsets.UTF_8)
+        return java.security.MessageDigest.isEqual(provided, expected)
     }
 
     private fun handleHelperPoll(client: Socket, authorization: String?) {
@@ -376,7 +382,14 @@ class BridgeHttpServer(
             respondAndClose(client, 401, "text/plain", "bad timestamp")
             return
         }
-        val rejection = Ed25519Verify.verify(method, path, ts, nonce, body, signature)
+        // The query string (which carries `pkg` - i.e. *which app* this
+        // request targets) must be covered by the signature, not just the
+        // bare path: otherwise a signed request's query string could be
+        // swapped for a different one and the signature would still check
+        // out (replay protection happens to block the exact-resend case,
+        // but the signature itself shouldn't rely on that to be meaningful).
+        val pathAndQuery = if (query.isEmpty()) path else "$path?$query"
+        val rejection = Ed25519Verify.verify(method, pathAndQuery, ts, nonce, body, signature)
         if (rejection != null) {
             log("privileged: rejected: $rejection")
             respondAndClose(client, 401, "text/plain", rejection)
