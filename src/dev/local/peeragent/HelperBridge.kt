@@ -43,15 +43,27 @@ object HelperBridge {
     val SHARED_SECRET = SharedSecret.VALUE
 
     private const val WAIT_TIMEOUT_MS = 60_000L
+    // A fire-and-forget request (enqueueAsync: INSTALL, local-stop) has no
+    // caller waiting to clear `current` on its own timeout the way
+    // enqueueAndWait's finally block does - if the helper dies or never
+    // polls it up, the single in-flight slot would otherwise stay wedged
+    // forever, blocking every request after it (found live: a STOP queued
+    // right as the helper was exiting left `current` stuck, and the next
+    // DIAG call failed immediately with "already in flight" instead of even
+    // attempting to run). Anything older than this is treated as abandoned.
+    private const val STALE_MS = 90_000L
     private val nextId = AtomicLong(1)
 
     class PendingRequest(val id: Long, val action: String, val pkg: String, val body: ByteArray)
 
     private class InFlight(val request: PendingRequest) {
         val latch = CountDownLatch(1)
+        val createdAt = System.currentTimeMillis()
         @Volatile var resultOk: Boolean = false
         @Volatile var resultMessage: String = ""
     }
+
+    private fun isStale(inFlight: InFlight) = System.currentTimeMillis() - inFlight.createdAt > STALE_MS
 
     @Volatile private var current: InFlight? = null
     private val lock = Any()
@@ -76,7 +88,8 @@ object HelperBridge {
     // elsewhere (checking lastUpdateTime via dumpsys).
     fun enqueueAsync(action: String, pkg: String, body: ByteArray): Long? {
         synchronized(lock) {
-            if (current != null) return null
+            val existing = current
+            if (existing != null && !isStale(existing)) return null
             val inFlight = InFlight(PendingRequest(nextId.getAndIncrement(), action, pkg, body))
             current = inFlight
             return inFlight.request.id
@@ -87,7 +100,8 @@ object HelperBridge {
     fun enqueueAndWait(action: String, pkg: String, body: ByteArray): RelayResult {
         val inFlight: InFlight
         synchronized(lock) {
-            if (current != null) return RelayResult(false, "another privileged request is already in flight")
+            val existing = current
+            if (existing != null && !isStale(existing)) return RelayResult(false, "another privileged request is already in flight")
             inFlight = InFlight(PendingRequest(nextId.getAndIncrement(), action, pkg, body))
             current = inFlight
         }
