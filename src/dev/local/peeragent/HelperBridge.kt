@@ -114,8 +114,23 @@ object HelperBridge {
         }
     }
 
+    // Updated on every real poll from the helper (~1.5s interval - see
+    // PrivilegedHelper.java's POLL_INTERVAL_MS), so the tile app can show
+    // whether host3 has actually finished bootstrapping it yet instead of a
+    // static "waiting" message that never changes once it's actually
+    // running (found live: exactly this staleness, with the tile
+    // correctly armed and the helper already running and handling real
+    // requests).
+    @Volatile private var lastPollAt: Long = 0
+    private const val LIVENESS_WINDOW_MS = 5_000L
+
+    fun helperConnected(): Boolean = System.currentTimeMillis() - lastPollAt < LIVENESS_WINDOW_MS
+
     /** Called from GET /helper/poll. Returns null if nothing pending. */
-    fun poll(): PendingRequest? = current?.request
+    fun poll(): PendingRequest? {
+        lastPollAt = System.currentTimeMillis()
+        return current?.request
+    }
 
     /**
      * Called from POST /helper/result. Clears `current` itself (not just

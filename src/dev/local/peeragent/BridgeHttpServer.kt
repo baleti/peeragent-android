@@ -298,6 +298,17 @@ class BridgeHttpServer(
                         respondAndClose(client, if (queued) 200 else 503, "text/plain", if (queued) "stop queued" else "another privileged request is already in flight")
                     }
                 }
+                // Loopback-only, read-only, no secret: just "is the
+                // privileged process currently polling", for the tile app's
+                // notification text. Not sensitive - reveals no more than
+                // whether SOME local process is alive and calling in.
+                method == "GET" && path == "/helper/status" -> {
+                    if (client.inetAddress?.isLoopbackAddress != true) {
+                        respondAndClose(client, 403, "text/plain", "forbidden")
+                    } else {
+                        respondAndClose(client, 200, "text/plain", if (HelperBridge.helperConnected()) "connected" else "not connected")
+                    }
+                }
                 else -> respondAndClose(client, 404, "text/plain", "not found")
             }
         } catch (t: Throwable) {
