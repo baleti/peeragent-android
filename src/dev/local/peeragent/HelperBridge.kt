@@ -126,10 +126,26 @@ object HelperBridge {
 
     fun helperConnected(): Boolean = System.currentTimeMillis() - lastPollAt < LIVENESS_WINDOW_MS
 
-    /** Called from GET /helper/poll. Returns null if nothing pending. */
+    /**
+     * Called from GET /helper/poll. Returns null if nothing pending.
+     *
+     * A stale request is discarded here, not just refused as a *new*
+     * enqueue - found live: a STOP queued by a disarm tap while no helper
+     * was running sat in `current` indefinitely (nothing ever polled it up
+     * to clear it), then got served, unwanted, to the *next* freshly-
+     * bootstrapped helper's very first poll - which dutifully obeyed a
+     * minutes-old command and exited immediately instead of starting up.
+     */
     fun poll(): PendingRequest? {
         lastPollAt = System.currentTimeMillis()
-        return current?.request
+        synchronized(lock) {
+            val existing = current
+            if (existing != null && isStale(existing)) {
+                current = null
+                return null
+            }
+            return existing?.request
+        }
     }
 
     /**
