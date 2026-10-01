@@ -248,11 +248,34 @@ class BridgeHttpServer(
                 method == "POST" && path == "/command/seek-to" -> handleSeekTo(client, query)
                 method == "POST" && path == "/command/volume-up" -> { sink.volumeUp(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/volume-down" -> { sink.volumeDown(); respondAndClose(client, 200, "text/plain", "ok") }
+                // action= defaults to DIAG; LOGCAT reuses the same route and
+                // auth path, just a different (equally narrow - see
+                // PrivilegedHelper's class doc) read-only action on the
+                // same package.
                 method == "GET" && path == "/privileged/diagnostics" ->
                     handlePrivileged(client, "GET", path, query, signature, timestamp, nonce, ByteArray(0)) { q ->
                         val pkg = queryParam(q, "pkg") ?: return@handlePrivileged 400 to "missing pkg"
-                        val r = HelperBridge.enqueueAndWait("DIAG", pkg, ByteArray(0))
+                        val action = queryParam(q, "action")?.uppercase() ?: "DIAG"
+                        if (action != "DIAG" && action != "LOGCAT") return@handlePrivileged 400 to "unknown action"
+                        val r = HelperBridge.enqueueAndWait(action, pkg, ByteArray(0))
                         (if (r.ok) 200 else 502) to r.message
+                    }
+                // Whole-screen, not per-package (see PrivilegedHelper's
+                // screenshot() - one fixed `screencap -p` call). The helper
+                // returns it base64-encoded through the existing text-only
+                // result protocol; decoded back to real PNG bytes here so
+                // the caller gets a normal image/png response.
+                method == "GET" && path == "/privileged/screenshot" ->
+                    handlePrivileged(client, "GET", path, query, signature, timestamp, nonce, ByteArray(0)) { _ ->
+                        val r = HelperBridge.enqueueAndWait("SCREENSHOT", "", ByteArray(0))
+                        if (!r.ok) return@handlePrivileged 502 to r.message
+                        val png = try {
+                            android.util.Base64.decode(r.message, android.util.Base64.DEFAULT)
+                        } catch (e: Exception) {
+                            return@handlePrivileged 502 to "bad base64 from helper: ${e.message}"
+                        }
+                        respondBytesAndClose(client, "image/png", png)
+                        null // already sent the response
                     }
                 method == "POST" && path == "/privileged/install" -> {
                     if (contentLength <= 0 || contentLength > 200 * 1024 * 1024) {
@@ -377,7 +400,7 @@ class BridgeHttpServer(
         timestamp: String?,
         nonce: String?,
         body: ByteArray,
-        action: (String) -> Pair<Int, String>,
+        action: (String) -> Pair<Int, String>?,
     ) {
         if (wireGuardActive?.invoke() != true) {
             log("privileged: rejected, WireGuard not active")
@@ -406,8 +429,11 @@ class BridgeHttpServer(
             respondAndClose(client, 401, "text/plain", rejection)
             return
         }
-        val (code, message) = action(query)
-        respondAndClose(client, code, "text/plain", message)
+        // null means the action already sent its own response (e.g. a
+        // binary one via respondBytesAndClose) - respondAndClose here would
+        // otherwise write a second response onto an already-closed socket.
+        val result = action(query) ?: return
+        respondAndClose(client, result.first, "text/plain", result.second)
     }
 
     private fun queryParam(query: String, name: String): String? =
