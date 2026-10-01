@@ -1,5 +1,6 @@
 package dev.local.peeragent
 
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -29,18 +30,45 @@ import java.util.concurrent.atomic.AtomicLong
  * outbound loopback connection, and peeragent's own listening socket is
  * something it already fully controls. Caller identity for the two new
  * endpoints this exposes (/helper/poll, /helper/result) is *not* verified by
- * uid - the interim shared secret below is checked instead, since neither
- * procfs-uid nor SELinux-checked IPC turned out to be reachable from this
- * side of the boundary. This is a known-narrower interim MVP for Phase 1: it
- * should become a fresh per-session secret delivered over the same
- * Ed25519-signed bootstrap channel used for everything else, not a value
- * fixed at build time, before this goes beyond local testing.
+ * uid - a shared secret is checked instead, since neither procfs-uid nor
+ * SELinux-checked IPC turned out to be reachable from this side of the
+ * boundary. Fresh per bootstrap session (startNewSession(), called from
+ * POST /helper/new-session), not a value fixed at build time.
  */
 object HelperBridge {
-    // MVP only - see class doc. SharedSecret.kt is gitignored (this repo is
-    // public); matches the same value in
-    // peer-app-debugger-android/helper/SharedSecret.java.
-    val SHARED_SECRET = SharedSecret.VALUE
+    // Was a value fixed at build time (SharedSecret.kt, gitignored - this
+    // repo is public); now generated fresh by startNewSession() each time
+    // the tile app self-bootstraps, passed to the helper as an
+    // app_process launch argument. SharedSecret.VALUE survives only as the
+    // fallback a manually-launched helper (adb shell, no launch arg - this
+    // project's own testing workflow) still authenticates with; a warning
+    // logs on the helper side whenever that fallback is actually used.
+    @Volatile var currentSecret: String = SharedSecret.VALUE
+        private set
+
+    /**
+     * Starts a fresh bootstrap session: a new random secret, with any
+     * already-connected helper (necessarily authenticated under the *old*
+     * secret) told to stop first and given a moment to actually do so.
+     * Without this ordering, swapping the secret out from under a live
+     * helper would orphan it - its poll/result calls would start failing
+     * auth immediately, with no way left to deliver it a STOP using the
+     * new secret it doesn't know.
+     */
+    fun startNewSession(): String {
+        if (helperConnected()) {
+            requestLocalStop()
+            val deadline = System.currentTimeMillis() + 5_000
+            while (helperConnected() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(200)
+            }
+        }
+        val bytes = ByteArray(32)
+        SecureRandom().nextBytes(bytes)
+        val secret = bytes.joinToString("") { "%02x".format(it) }
+        currentSecret = secret
+        return secret
+    }
 
     private const val WAIT_TIMEOUT_MS = 60_000L
     // A fire-and-forget request (enqueueAsync: INSTALL, local-stop) has no

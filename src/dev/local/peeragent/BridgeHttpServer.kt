@@ -332,6 +332,19 @@ class BridgeHttpServer(
                         respondAndClose(client, 200, "text/plain", if (HelperBridge.helperConnected()) "connected" else "not connected")
                     }
                 }
+                // Loopback-only, no secret needed (this *is* the call that
+                // establishes the secret a helper will be launched with) -
+                // the tile app calls this right before bootstrapping, then
+                // passes the returned value to the helper as an app_process
+                // launch argument. See HelperBridge.startNewSession's doc
+                // for why any already-connected helper is stopped first.
+                method == "POST" && path == "/helper/new-session" -> {
+                    if (client.inetAddress?.isLoopbackAddress != true) {
+                        respondAndClose(client, 403, "text/plain", "forbidden")
+                    } else {
+                        respondAndClose(client, 200, "text/plain", HelperBridge.startNewSession())
+                    }
+                }
                 else -> respondAndClose(client, 404, "text/plain", "not found")
             }
         } catch (t: Throwable) {
@@ -357,7 +370,7 @@ class BridgeHttpServer(
         // attacker at worst) could still time-leak the secret byte-by-byte
         // via string equality's early-exit-on-first-mismatch behavior.
         val provided = authorization.removePrefix("Bearer ").toByteArray(StandardCharsets.UTF_8)
-        val expected = HelperBridge.SHARED_SECRET.toByteArray(StandardCharsets.UTF_8)
+        val expected = HelperBridge.currentSecret.toByteArray(StandardCharsets.UTF_8)
         return java.security.MessageDigest.isEqual(provided, expected)
     }
 
