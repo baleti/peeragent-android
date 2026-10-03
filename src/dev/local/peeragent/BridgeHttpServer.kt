@@ -56,6 +56,7 @@ class BridgeHttpServer(
     private val port: Int,
     private val sink: CommandSink,
     private val log: (String) -> Unit,
+    private val adb: AdbToggle? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -215,6 +216,16 @@ class BridgeHttpServer(
                     if (art != null) respondBytesAndClose(client, "image/jpeg", art)
                     else respondAndClose(client, 404, "text/plain", "no art")
                 }
+                method == "GET" && path == "/adb-port" -> {
+                    val p = adb?.port()
+                    if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
+                    else respondAndClose(client, 404, "text/plain", "wireless debugging off")
+                }
+                method == "POST" && path == "/adb/enable" -> handleAdbEnable(client)
+                method == "POST" && path == "/adb/release" -> {
+                    adb?.release()
+                    respondAndClose(client, 200, "text/plain", "ok")
+                }
                 method == "POST" && path == "/command/play" -> { sink.play(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/pause" -> { sink.pause(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/next" -> { sink.next(); respondAndClose(client, 200, "text/plain", "ok") }
@@ -245,6 +256,17 @@ class BridgeHttpServer(
             }
             sb.append(c.toChar())
             if (sb.length > 8192) return sb.toString()
+        }
+    }
+
+    private fun handleAdbEnable(client: Socket) {
+        if (adb == null) { respondAndClose(client, 404, "text/plain", "not available"); return }
+        try {
+            val p = adb.acquire()
+            if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
+            else respondAndClose(client, 503, "text/plain", "no port after enabling")
+        } catch (e: SecurityException) {
+            respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
         }
     }
 
