@@ -20,6 +20,7 @@ interface CommandSink {
     fun seekTo(positionMs: Long)
     fun volumeUp()
     fun volumeDown()
+    fun setVolume(ratio: Float)
     fun statusJson(): String
     fun artJpeg(): ByteArray?
 }
@@ -235,6 +236,7 @@ class BridgeHttpServer(
                 method == "POST" && path == "/command/seek-to" -> handleSeekTo(client, query)
                 method == "POST" && path == "/command/volume-up" -> { sink.volumeUp(); respondAndClose(client, 200, "text/plain", "ok") }
                 method == "POST" && path == "/command/volume-down" -> { sink.volumeDown(); respondAndClose(client, 200, "text/plain", "ok") }
+                method == "POST" && path == "/command/volume-set" -> handleVolumeSet(client, query)
                 else -> respondAndClose(client, 404, "text/plain", "not found")
             }
         } catch (t: Throwable) {
@@ -268,6 +270,21 @@ class BridgeHttpServer(
         } catch (e: SecurityException) {
             respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
         }
+    }
+
+    private fun handleVolumeSet(client: Socket, query: String) {
+        // "ratio=" 0..1 as digits with an optional single decimal point.
+        val ratio = query.split("&")
+            .firstOrNull { it.startsWith("ratio=") }
+            ?.removePrefix("ratio=")
+            ?.takeIf { Regex("""\d{1,3}(\.\d{1,6})?""").matches(it) }
+            ?.toFloatOrNull()
+        if (ratio == null) {
+            respondAndClose(client, 400, "text/plain", "bad or missing ratio")
+            return
+        }
+        sink.setVolume(ratio.coerceIn(0f, 1f))
+        respondAndClose(client, 200, "text/plain", "ok")
     }
 
     private fun handleSeekTo(client: Socket, query: String) {

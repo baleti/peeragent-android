@@ -61,6 +61,7 @@ full security model.
 | POST | `/adb/release` | Turn Wireless debugging back off, only if `/adb/enable` was what turned it on |
 | POST | `/command/play` \| `pause` \| `next` \| `prev` \| `seek-fwd` \| `seek-back` \| `volume-up` \| `volume-down` | |
 | POST | `/command/seek-to?ms=<n>` | Seek to an absolute position |
+| POST | `/command/volume-set?ratio=<0..1>` | Set STREAM_MUSIC to the nearest step of that fraction |
 | GET | `/events` | Server-sent events (currently unused by any client) |
 
 ## License

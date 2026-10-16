@@ -289,6 +289,10 @@ class BridgeForegroundService : Service(), CommandSink {
         audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
     override fun volumeDown() =
         audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+    override fun setVolume(ratio: Float) {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(ratio * max), AudioManager.FLAG_SHOW_UI)
+    }
     override fun seekTo(positionMs: Long) {
         val c = canonical ?: return
         val duration = c.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: -1L
