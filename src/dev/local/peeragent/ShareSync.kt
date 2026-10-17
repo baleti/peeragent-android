@@ -150,8 +150,11 @@ class ShareSync(
         if (left > 0) { tmp.delete(); return false }
         if (mtimeSec != null) tmp.setLastModified(mtimeSec * 1000)
         mark(rel, length, tmp.lastModified() / 1000)
-        if (dest.exists()) dest.delete()
-        return tmp.renameTo(dest)
+        // Atomic replace: a delete-then-rename would fire a DELETE event for
+        // [dest] that the observer then pushes back to host3, deleting its copy.
+        java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        return true
     }
 
     fun deleteFile(rel: String): Boolean {
@@ -198,8 +201,9 @@ class ShareSync(
     }
 
     private fun pushDelete(rel: String) {
+        // Anything host3 just applied here (even a replace) is not a user delete.
         val a = applied[rel]
-        if (a != null && a.size == DELETED && a.expiry >= System.currentTimeMillis()) return
+        if (a != null && a.expiry >= System.currentTimeMillis()) return
         log("share-sync push delete $rel: ${call("DELETE", "/file/" + encode(rel))}")
     }
 
