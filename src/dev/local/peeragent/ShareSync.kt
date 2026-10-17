@@ -37,9 +37,14 @@ class ShareSync(
         const val ECHO_MS = 10_000L
         const val RECONCILE_MS = 60_000L
         private const val DELETED = -1L
+        private const val TRASH_DAYS = 30L
         private val MASK = FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or
             FileObserver.MOVED_FROM or FileObserver.DELETE or FileObserver.CREATE
     }
+
+    // Files a host3 change replaces or deletes are kept here first (outside
+    // [root], so never synced) and pruned after TRASH_DAYS.
+    private val trash = File(root.parentFile, ".sync-trash")
 
     private class Applied(val size: Long, val mtime: Long, val expiry: Long)
 
@@ -122,6 +127,16 @@ class ShareSync(
         return a.expiry >= System.currentTimeMillis() && a.size == size && a.mtime == mtime
     }
 
+    private fun trashDest(rel: String): File {
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+        return File(File(trash, stamp), rel).also { it.parentFile?.mkdirs() }
+    }
+
+    private fun pruneTrash() {
+        val cutoff = System.currentTimeMillis() - TRASH_DAYS * 86_400_000L
+        trash.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { it.deleteRecursively() }
+    }
+
     fun manifestJson(): String {
         val files = JSONObject()
         root.walkTopDown().filter { it.isFile && !it.name.endsWith(PARTIAL) }.forEach {
@@ -148,19 +163,28 @@ class ShareSync(
             }
         }
         if (left > 0) { tmp.delete(); return false }
+        if (mtimeSec != null && dest.isFile && dest.length() == length && dest.lastModified() / 1000 == mtimeSec) {
+            tmp.delete() // already identical: an echo of our own push
+            return true
+        }
         if (mtimeSec != null) tmp.setLastModified(mtimeSec * 1000)
         mark(rel, length, tmp.lastModified() / 1000)
+        if (dest.isFile) dest.copyTo(trashDest(rel), overwrite = true)
         // Atomic replace: a delete-then-rename would fire a DELETE event for
         // [dest] that the observer then pushes back to host3, deleting its copy.
         java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
             java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        // A rename over an existing file leaves the OLD mtime on this storage
+        // layer, which made the echo check miss and bounce the file back.
+        if (mtimeSec != null) dest.setLastModified(mtimeSec * 1000)
+        mark(rel, length, dest.lastModified() / 1000)
         return true
     }
 
     fun deleteFile(rel: String): Boolean {
         val f = resolve(rel)?.takeIf { it.isFile } ?: return false
         mark(rel, DELETED, 0)
-        val ok = f.delete()
+        val ok = f.renameTo(trashDest(rel))
         var d = f.parentFile
         while (d != null && d != root.canonicalFile && d.delete()) d = d.parentFile
         return ok
@@ -194,22 +218,27 @@ class ShareSync(
 
     private fun pushFile(rel: String) {
         val f = File(root, rel)
-        if (!f.isFile || isEcho(rel, f.length(), f.lastModified() / 1000)) return
+        if (!f.isFile) return
+        if (isEcho(rel, f.length(), f.lastModified() / 1000)) return
+        val ap = applied[rel]
+        if (ap != null) log("share-sync not-echo $rel: file=${f.length()}/${f.lastModified() / 1000} applied=${ap.size}/${ap.mtime} age=${System.currentTimeMillis() - ap.expiry + ECHO_MS}ms")
         val code = call("PUT", "/file/" + encode(rel), f)
         if (code == 200) lastPushOk = System.currentTimeMillis()
         log("share-sync push $rel: $code")
     }
 
     private fun pushDelete(rel: String) {
-        // Anything host3 just applied here (even a replace) is not a user delete.
         val a = applied[rel]
-        if (a != null && a.expiry >= System.currentTimeMillis()) return
+        if (a != null && a.size == DELETED && a.expiry >= System.currentTimeMillis()) return
         log("share-sync push delete $rel: ${call("DELETE", "/file/" + encode(rel))}")
     }
 
     private fun pusher() {
         while (running) {
             val (op, rel) = outbox.take()
+            // Debounce: lets a peer-applied rename settle (mtime fix-up, echo
+            // record) and coalesces the burst of events one save produces.
+            Thread.sleep(300)
             try {
                 if (op == "put") pushFile(rel) else pushDelete(rel)
             } catch (e: Exception) {
@@ -242,6 +271,7 @@ class ShareSync(
 
     private fun reconciler() {
         while (running) {
+            try { pruneTrash() } catch (_: Exception) {}
             try { reconcile() } catch (e: Exception) { log("share-sync catch-up: host3 unreachable (${e.javaClass.simpleName})") }
             try { Thread.sleep(RECONCILE_MS) } catch (_: InterruptedException) { return }
         }

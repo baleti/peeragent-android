@@ -15,10 +15,13 @@ Event driven in both directions, no sync state, no deletes-by-diff:
     only as live events, so an offline gap can resurrect a deleted file
     (conflict handling is deliberately out of scope for now).
 
+Files a peer's change replaces or deletes are moved to TRASH first (30 days),
+so nothing can be lost silently, even by an offline-gap resurrection.
+
 Changes applied from the peer are remembered for a few seconds so the watcher
 does not echo them straight back.
 """
-import ctypes, http.client, ipaddress, json, os, queue, struct, sys, threading
+import ctypes, http.client, ipaddress, json, os, queue, shutil, struct, sys, threading
 import time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -38,6 +41,10 @@ PORT = int(os.environ.get("SHARE_SYNC_PORT", "8791"))
 RECONCILE_S = int(os.environ.get("SHARE_SYNC_RECONCILE_S", "120"))
 PARTIAL = ".part-sync"
 ECHO_S = 10
+# Anything a peer's change replaces or deletes is kept here first (outside
+# ROOT, so it is never synced) and pruned after TRASH_DAYS.
+TRASH = os.path.expanduser(os.environ.get("SHARE_SYNC_TRASH", "~/.local/share/share-sync/trash"))
+TRASH_DAYS = 30
 
 applied = {}  # rel -> (size, mtime, expiry) for files the peer just wrote; (None, None, expiry) for deletes
 applied_lock = threading.Lock()
@@ -65,6 +72,23 @@ def is_echo(rel, size, mtime):
         if not a or a[2] < time.time():
             return False
         return (a[0], a[1]) == (size, mtime)
+
+
+def trash_copy(full, rel, remove):
+    """Keep the file about to be overwritten (copy) or deleted (move) in TRASH."""
+    dest = os.path.join(TRASH, time.strftime("%Y%m%d-%H%M%S"), rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    (shutil.move if remove else shutil.copy2)(full, dest)
+
+
+def prune_trash():
+    cutoff = time.time() - TRASH_DAYS * 86400
+    if not os.path.isdir(TRASH):
+        return
+    for d in os.listdir(TRASH):
+        p = os.path.join(TRASH, d)
+        if os.path.getmtime(p) < cutoff:
+            shutil.rmtree(p, ignore_errors=True)
 
 
 def local_manifest():
@@ -155,9 +179,16 @@ class Handler(BaseHTTPRequestHandler):
             os.unlink(tmp)
             return self.reply(400)
         mt = self.headers.get("X-Mtime")
+        if mt and os.path.isfile(full):
+            cur = os.stat(full)
+            if cur.st_size == size and int(cur.st_mtime) == int(mt):
+                os.unlink(tmp)  # already identical: an echo of our own push
+                return self.reply(200, b"ok")
         if mt:
             os.utime(tmp, (int(mt), int(mt)))
         mark_applied(rel, size, int(os.stat(tmp).st_mtime))
+        if os.path.isfile(full):
+            trash_copy(full, rel, remove=False)
         os.replace(tmp, full)
         self.reply(200, b"ok")
 
@@ -169,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
         if not full or not os.path.isfile(full):
             return self.reply(404)
         mark_applied(rel, None, None)
-        os.unlink(full)
+        trash_copy(full, rel, remove=True)
         d = os.path.dirname(full)
         while d != ROOT:
             try:
@@ -217,7 +248,7 @@ def push_file(rel):
 def push_delete(rel):
     with applied_lock:
         a = applied.get(rel)
-        if a and a[0] is None and a[2] >= time.time():
+        if a and a[0] is None and a[2] >= time.time():  # peer-applied delete
             return True
     code, _ = phone_request("DELETE", "/share/file/" + urllib.parse.quote(rel))
     log(f"push delete {rel}: {code}")
@@ -250,6 +281,7 @@ def reconcile():
 
 def reconciler():
     while True:
+        prune_trash()
         try:
             reconcile()
         except Exception as e:
