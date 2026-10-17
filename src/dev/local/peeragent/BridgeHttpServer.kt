@@ -58,6 +58,7 @@ class BridgeHttpServer(
     private val sink: CommandSink,
     private val log: (String) -> Unit,
     private val adb: AdbToggle? = null,
+    private val share: ShareSync? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -181,6 +182,8 @@ class BridgeHttpServer(
             // also sent a body does not leave it framed on the socket.
             var guard: String? = null
             var origin: String? = null
+            var contentLength = 0L
+            var mtimeSec: Long? = null
             while (true) {
                 val line = readHttpLine(rawIn) ?: break
                 if (line.isEmpty()) break
@@ -189,6 +192,8 @@ class BridgeHttpServer(
                 when (line.substring(0, idx).trim().lowercase()) {
                     "x-peer-agent" -> guard = line.substring(idx + 1).trim()
                     "origin" -> origin = line.substring(idx + 1).trim()
+                    "content-length" -> contentLength = line.substring(idx + 1).trim().toLongOrNull() ?: 0L
+                    "x-mtime" -> mtimeSec = line.substring(idx + 1).trim().toLongOrNull()
                 }
             }
 
@@ -196,7 +201,8 @@ class BridgeHttpServer(
             // then Origin (a cross-site form/fetch always sends it), then the
             // required non-simple header (an <img>/<form> cannot set it, and a
             // cross-origin fetch that does triggers a preflight we fail here).
-            if (method != "GET" && method != "POST") {
+            val shareVerb = (method == "PUT" || method == "DELETE") && path.startsWith("/share/")
+            if (method != "GET" && method != "POST" && !shareVerb) {
                 respondAndClose(client, 405, "text/plain", "method not allowed")
                 return
             }
@@ -210,6 +216,7 @@ class BridgeHttpServer(
             }
 
             when {
+                path.startsWith("/share/") -> handleShare(client, rawIn, method, path, contentLength, mtimeSec)
                 method == "GET" && path == "/events" -> handleSse(client)
                 method == "GET" && path == "/status" -> respondAndClose(client, 200, "application/json", sink.statusJson())
                 method == "GET" && path == "/art" -> {
@@ -242,6 +249,39 @@ class BridgeHttpServer(
         } catch (t: Throwable) {
             log("handleClient failed: ${t.javaClass.name}: ${t.message}")
             closeQuietly(client)
+        }
+    }
+
+    // Folder sync with host3 (see ShareSync). Paths are /share/manifest and
+    // /share/file/<url-encoded relative path>; the WireGuard/Origin/header
+    // checks in handleClient already ran.
+    private fun handleShare(client: Socket, input: InputStream, method: String, path: String, length: Long, mtimeSec: Long?) {
+        val sync = share
+        if (sync == null) { respondAndClose(client, 404, "text/plain", "share sync off"); return }
+        if (method == "GET" && path == "/share/manifest") {
+            respondAndClose(client, 200, "application/json", sync.manifestJson())
+            return
+        }
+        if (!path.startsWith("/share/file/")) { respondAndClose(client, 404, "text/plain", "not found"); return }
+        val rel = java.net.URLDecoder.decode(path.removePrefix("/share/file/"), "UTF-8")
+        client.soTimeout = 30_000
+        when (method) {
+            "GET" -> {
+                val f = sync.openFile(rel)
+                if (f == null) { respondAndClose(client, 404, "text/plain", "not found"); return }
+                try {
+                    val os = client.getOutputStream()
+                    os.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n" +
+                        "Content-Length: ${f.length()}\r\nConnection: close\r\n\r\n").toByteArray(StandardCharsets.UTF_8))
+                    f.inputStream().use { it.copyTo(os) }
+                    os.flush()
+                } catch (_: IOException) {
+                } finally {
+                    closeQuietly(client)
+                }
+            }
+            "PUT" -> respondAndClose(client, if (sync.putFile(rel, input, length, mtimeSec)) 200 else 400, "text/plain", "ok")
+            else -> respondAndClose(client, if (sync.deleteFile(rel)) 200 else 404, "text/plain", "ok")
         }
     }
 

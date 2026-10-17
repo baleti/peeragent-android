@@ -8,6 +8,11 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.drawable.Icon
+import android.net.Uri
+import android.provider.DocumentsContract
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -72,7 +77,39 @@ class MainActivity : Activity() {
         }
         root.addView(startBtn)
 
+        root.addView(Button(this).apply {
+            text = "Grant All files access (host3 folder sync)"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+            }
+        })
+
+        root.addView(Button(this).apply {
+            text = "Add 'host3' folder shortcut to home screen"
+            setOnClickListener { pinHost3Shortcut() }
+        })
+
         setContentView(ScrollView(this).apply { addView(root) })
+        if (intent.getBooleanExtra("pin_shortcut", false)) pinHost3Shortcut()
+    }
+
+    // Opens /sdcard/share/host3 (the folder mirrored with host3's
+    // ~/share/pixel6) in the default Files app.
+    private fun pinHost3Shortcut() {
+        val sm = getSystemService(ShortcutManager::class.java)
+        if (!sm.isRequestPinShortcutSupported) {
+            Toast.makeText(this, "launcher can't pin shortcuts", Toast.LENGTH_LONG).show()
+            return
+        }
+        val folder = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:share/host3")
+        val open = Intent(Intent.ACTION_VIEW).setDataAndType(folder, DocumentsContract.Document.MIME_TYPE_DIR)
+        val info = ShortcutInfo.Builder(this, "host3-folder")
+            .setShortLabel("host3")
+            .setLongLabel("host3 shared folder")
+            .setIcon(Icon.createWithResource(this, applicationInfo.icon))
+            .setIntent(open)
+            .build()
+        sm.requestPinShortcut(info, null)
     }
 
     override fun onRequestPermissionsResult(

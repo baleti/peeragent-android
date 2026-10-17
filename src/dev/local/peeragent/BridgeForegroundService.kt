@@ -27,6 +27,8 @@ class BridgeForegroundService : Service(), CommandSink {
         const val CHANNEL_ID = "peeragent_status"
         const val NOTIF_ID = 1
         const val PORT = 8788
+        // host3's share-sync daemon, on its WireGuard address.
+        const val SHARE_HOST = "10.10.0.2:8791"
         const val SEEK_STEP_MS = 5000L
     }
 
@@ -35,6 +37,7 @@ class BridgeForegroundService : Service(), CommandSink {
     private var httpServer: BridgeHttpServer? = null
     private var adbPortFinder: AdbPortFinder? = null
     private var adbToggle: AdbToggle? = null
+    private var shareSync: ShareSync? = null
     private val audioManager: AudioManager by lazy { getSystemService(AudioManager::class.java) }
 
     private val controllers = CopyOnWriteArrayList<MediaController>()
@@ -86,7 +89,15 @@ class BridgeForegroundService : Service(), CommandSink {
                 val finder = AdbPortFinder(this, adbLog).also { it.start() }
                 adbPortFinder = finder
                 adbToggle = AdbToggle(this, finder, adbLog)
-                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle)
+                // Folder mirror with host3: needs All files access, so skip
+                // (rather than crash) until that has been granted.
+                if (android.os.Environment.isExternalStorageManager()) {
+                    val shareLog = { msg: String -> Log.i(TAG, msg); diag(msg) }
+                    shareSync = ShareSync(java.io.File("/sdcard/share/host3"), SHARE_HOST, shareLog).also { it.start() }
+                } else {
+                    diag("share sync not started: All files access not granted")
+                }
+                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle, shareSync)
                 httpServer?.start()
             } catch (e: Throwable) {
                 diag("onCreate: http server threw ${e.javaClass.name}: ${e.message}")
@@ -107,6 +118,7 @@ class BridgeForegroundService : Service(), CommandSink {
         for ((controller, cb) in callbacks) controller.unregisterCallback(cb)
         callbacks.clear()
         httpServer?.stop()
+        shareSync?.stop()
         adbPortFinder?.stop()
         super.onDestroy()
     }
