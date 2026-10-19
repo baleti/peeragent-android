@@ -61,8 +61,31 @@ class PairingCaptureService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val root = rootInActiveWindow ?: return
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            // A static screen emits no events, so drive navigation by timer too.
+            if (armed()) step()
+            handler.postDelayed(this, 700)
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        handler.post(tick)
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(tick)
+        super.onDestroy()
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = step()
+
+    private fun step() {
+        val root = rootInActiveWindow
+        if (root == null) { android.util.Log.i("PairCap", "step: no root"); return }
+        android.util.Log.i("PairCap", "step: pkg=${root.packageName} armed=${armed()}")
         if (root.packageName != "com.android.settings") return
         try {
             val texts = ArrayList<String>()
@@ -87,7 +110,8 @@ class PairingCaptureService : AccessibilityService() {
                 if (clickText(root, label)) return
             }
             // Developer options list: the row may be off-screen.
-            scrollForward(root)
+            val sc = scrollForward(root)
+            android.util.Log.i("PairCap", "scroll -> $sc")
         } finally {
             root.recycle()
         }
@@ -112,13 +136,14 @@ class PairingCaptureService : AccessibilityService() {
         return false
     }
 
-    private fun scrollForward(root: AccessibilityNodeInfo) {
+    private fun scrollForward(root: AccessibilityNodeInfo): Boolean {
         fun find(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-            if (n.isScrollable) return n
+            // Deepest scrollable wins: the outer one is the collapsing-toolbar
+            // ScrollView, the list that holds the rows is nested inside it.
             for (i in 0 until n.childCount) { n.getChild(i)?.let { find(it)?.let { r -> return r } } }
-            return null
+            return if (n.isScrollable) n else null
         }
-        find(root)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        return find(root)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
     }
 
     override fun onInterrupt() {}
