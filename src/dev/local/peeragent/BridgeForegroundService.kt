@@ -89,6 +89,8 @@ class BridgeForegroundService : Service(), CommandSink {
                 val finder = AdbPortFinder(this, adbLog).also { it.start() }
                 adbPortFinder = finder
                 adbToggle = AdbToggle(this, finder, adbLog)
+                try { PairingCaptureService.ensureEnabled(this) }
+                catch (e: SecurityException) { diag("pairing capture: cannot enable accessibility service: ${e.message}") }
                 // Folder mirror with host3: needs All files access, so skip
                 // (rather than crash) until that has been granted.
                 if (android.os.Environment.isExternalStorageManager()) {
@@ -97,7 +99,7 @@ class BridgeForegroundService : Service(), CommandSink {
                 } else {
                     diag("share sync not started: All files access not granted")
                 }
-                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle, shareSync)
+                httpServer = BridgeHttpServer(PORT, this, { msg -> Log.i(TAG, msg) }, adbToggle, shareSync, this)
                 httpServer?.start()
             } catch (e: Throwable) {
                 diag("onCreate: http server threw ${e.javaClass.name}: ${e.message}")

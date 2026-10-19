@@ -59,6 +59,7 @@ class BridgeHttpServer(
     private val log: (String) -> Unit,
     private val adb: AdbToggle? = null,
     private val share: ShareSync? = null,
+    private val appContext: android.content.Context? = null,
 ) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
@@ -230,6 +231,12 @@ class BridgeHttpServer(
                     else respondAndClose(client, 404, "text/plain", "wireless debugging off")
                 }
                 method == "POST" && path == "/adb/enable" -> handleAdbEnable(client)
+                method == "GET" && path == "/adb/pairing" -> {
+                    val p = PairingCaptureService.latest()
+                    if (p != null) respondAndClose(client, 200, "text/plain", p)
+                    else respondAndClose(client, 404, "text/plain", "no pairing dialog seen in the last 2 minutes")
+                }
+                method == "POST" && path == "/adb/pair-start" -> handlePairStart(client)
                 method == "POST" && path == "/adb/release" -> {
                     adb?.release()
                     respondAndClose(client, 200, "text/plain", "ok")
@@ -307,6 +314,34 @@ class BridgeHttpServer(
             val p = adb.acquire()
             if (p != null) respondAndClose(client, 200, "text/plain", p.toString())
             else respondAndClose(client, 503, "text/plain", "no port after enabling")
+        } catch (e: SecurityException) {
+            respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
+        }
+    }
+
+    /**
+     * Turn Wireless debugging on, open Developer options and let
+     * PairingCaptureService click through to the pairing dialog; answers
+     * "code ip:port" once it is on screen (up to 20 s).
+     */
+    private fun handlePairStart(client: Socket) {
+        if (adb == null || appContext == null) { respondAndClose(client, 404, "text/plain", "not available"); return }
+        try {
+            PairingCaptureService.clear()
+            PairingCaptureService.arm(40)
+            adb.acquire()
+            PairingCaptureService.openDevOptions(appContext)
+            val deadline = System.currentTimeMillis() + 20_000
+            while (System.currentTimeMillis() < deadline) {
+                PairingCaptureService.latest()?.let {
+                    PairingCaptureService.disarm()
+                    respondAndClose(client, 200, "text/plain", it)
+                    return
+                }
+                Thread.sleep(250)
+            }
+            PairingCaptureService.disarm()
+            respondAndClose(client, 504, "text/plain", "pairing dialog not reached (accessibility service enabled? screen unlocked?)")
         } catch (e: SecurityException) {
             respondAndClose(client, 500, "text/plain", "WRITE_SECURE_SETTINGS not granted")
         }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pairing_a11y_description">Reads the Wireless debugging pairing code and IP:port from the system Settings dialog (only com.android.settings) so a paired-by-you host can fetch it over the WireGuard tunnel.</string>
+</resources>
